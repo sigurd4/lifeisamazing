@@ -1,0 +1,38 @@
+// DRAKAMP
+
+Rule::GravitySelf(&GREEN, -0.32*G_MUL),
+Rule::Gravity(&GREEN, &RED, -0.17*G_MUL),
+Rule::Gravity(&GREEN, &YELLOW, 0.34*G_MUL),
+Rule::GravitySelf(&RED, -0.1*G_MUL),
+Rule::Gravity(&RED, &GREEN, -0.34*G_MUL),
+Rule::GravitySelf(&YELLOW, 0.15*G_MUL),
+Rule::Gravity(&YELLOW, &GREEN, -0.2*G_MUL),
+
+// løvetann
+
+    let rules: [Vec<Rule>; SPECIES_COUNT] = [
+        vec![
+            Rule::GravitySelf(0.07*G_MUL),
+            Rule::Gravity(&GREEN, 0.025*G_MUL),
+            Rule::Gravity(&BLUE, -0.09*G_MUL),
+            Rule::Gravity(&WHITE, -0.225*G_MUL),
+        ],
+        vec![
+            Rule::GravitySelf(0.065*G_MUL),
+            Rule::Gravity(&RED, 0.215*G_MUL),
+            Rule::Gravity(&BLUE, -0.50*G_MUL),
+            Rule::Gravity(&WHITE, -0.695*G_MUL),
+        ],
+        vec![
+            Rule::GravitySelf(-0.01*G_MUL),
+            Rule::Gravity(&RED, -0.75*G_MUL),
+            Rule::Gravity(&GREEN, -0.04*G_MUL),
+            Rule::Gravity(&WHITE, 0.34*G_MUL),
+        ],
+        vec![
+            Rule::GravitySelf(-0.365*G_MUL),
+            Rule::Gravity(&RED, -0.63*G_MUL),
+            Rule::Gravity(&GREEN, 0.365*G_MUL),
+            Rule::Gravity(&BLUE, -0.34*G_MUL),
+        ]
+    ];

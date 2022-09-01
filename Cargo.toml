@@ -1,0 +1,12 @@
+[package]
+name = "lifeisamazing"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rand = "0.8.5"
+piston2d-graphics = "0.42.0"
+piston_window = "*"
+array-init = "2.0.0"
