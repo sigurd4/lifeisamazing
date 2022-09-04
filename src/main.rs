@@ -35,7 +35,7 @@ const G_BIAS: F = -0.0;
 const G_BIAS_MUL: F = 40.0;
 const VISCOUSITY: F = 600.0;
 const SPAWN_AREA: SpawnArea = SpawnArea::Ellipse;
-const SIMULTANEOUS_ENFORCEMENTS: usize = 16;
+const SIMULTANEOUS_ENFORCEMENTS: usize = 8;
 const MAX_G_ORDER: u8 = 2;
 const RFRAMES: usize = 1;
 
