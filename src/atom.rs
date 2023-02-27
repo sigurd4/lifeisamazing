@@ -1,3 +1,7 @@
+use std::sync::{RwLock, RwLockReadGuard};
+
+use rayon::prelude::{ParallelIterator, IntoParallelRefIterator, IndexedParallelIterator};
+
 pub mod species;
 
 type F = f32;
@@ -29,6 +33,15 @@ impl Atom
         }
         self.vel[I] = (self.vel[I] + self.acc[I]*dt)*brakes;
         self.pos[I] = (self.pos[I] + self.vel[I]*dt).max(min).min(max);
+        /*self.pos[I] = self.pos[I] + self.vel[I]*dt;
+        if self.pos[I] < boundry[0][I]
+        {
+            self.pos[I] += boundry[1][I] - boundry[0][I]
+        }
+        if self.pos[I] > boundry[1][I]
+        {
+            self.pos[I] -= boundry[1][I] - boundry[0][I]
+        }*/
     }
 
     pub fn reset_acc(&mut self)
@@ -53,19 +66,35 @@ impl Atom
         ]
     }*/
 
-    pub fn dist_to(&self, pos: [F; 2]) -> [F; 2]
+    pub fn dist_to(&self, pos: [F; 2], _world_size: [F; 2]) -> [F; 2]
     {
-        [
+        let d = [
             pos[0] - self.pos[0],
             pos[1] - self.pos[1]
-        ]
+        ];
+        /*for i in 0..2
+        {
+            if d[i] > world_size[i]*0.5
+            {
+                d[i] -= world_size[i]
+            }
+            if d[i] < -world_size[i]*0.5
+            {
+                d[i] += world_size[i]
+            }
+        };*/
+        d
     }
 
-    fn gravity_from(&self, from: &Self, g: F, power: u8) -> [F; 2]
+    fn gravity_from(&self, pos: [F; 2], world_size: [F; 2], g: F, power: u8) -> [F; 2]
     {
-        let d = self.dist_to(from.pos);
-        let d_abs = d[0].hypot(d[1]);
-        let f_abs = g/d_abs.powi(power as i32);
+        let d = self.dist_to(pos, world_size);
+        if (d[0] == 0.0 || d[0] == -0.0) && (d[1] == 0.0 || d[1] == -0.0)
+        {
+            return [0.0, 0.0]
+        }
+        let d_abs_inv = d[0].hypot(d[1]).recip();
+        let f_abs = g*d_abs_inv.powi(power as i32 + 1);
 
         [
             f_abs*d[0],
@@ -73,41 +102,49 @@ impl Atom
         ]
     }
 
-    pub fn gravity_all(atoms: &[Self], g: F, power: u8) -> Vec<[F; 2]>
+    pub fn gravity_all(atoms: &[RwLock<Self>], world_size: [F; 2], g: F, power: u8) -> Vec<[F; 2]>
     {
         let mut force = vec![[0.0, 0.0]; atoms.len()];
 
+        let atoms: Vec<(usize, RwLockReadGuard<Atom>)> = atoms.iter()
+            .enumerate()
+            .filter_map(|(i, atom)| atom.read().ok().map(|atom| (i, atom)))
+            .collect();
         atoms
             .iter()
-            .enumerate()
-            .for_each(|(i, atom)| (&atoms[0..i])
+            .for_each(|(i, atom)| (&atoms[0..*i])
                 .iter()
-                .filter(|from| atom.pos != from.pos)
-                .enumerate()
                 .for_each(|(j, from)|
                 {
-                    let g = atom.gravity_from(&from, g, power);
+                    let g = atom.gravity_from(from.pos, world_size, g, power);
                     
-                    force[i][0] += g[0];
-                    force[i][1] += g[1];
+                    force[*i][0] += g[0];
+                    force[*i][1] += g[1];
 
-                    force[j][0] -= g[0];
-                    force[j][1] -= g[1];
+                    force[*j][0] -= g[0];
+                    force[*j][1] -= g[1];
                 })
             );
         
         force
     }
 
-    pub fn gravity_from_group<'a, I: Iterator<Item = &'a Atom>>(self, from: I, g: F, power: u8) -> [F; 2]
+    pub fn average_pos_and_count<'a, I: Iterator<Item = &'a RwLock<Atom>>>(atoms: I) -> (usize, [F; 2])
     {
-        from
-            .filter(|other| self.pos != other.pos)
-            .map(|b| self.gravity_from(b, g, power))
-            .reduce(|accum, gravity| [
-                accum[0] + gravity[0],
-                accum[1] + gravity[1]
-            ])
-            .unwrap_or([0.0, 0.0])
+        atoms
+            .filter_map(|atom| atom.read().ok())
+            .map(|atom| (1, atom.pos))
+            .reduce(|(n, accum), (i, pos)| (n + i, [
+                accum[0] + pos[0],
+                accum[1] + pos[1]
+            ]))
+            .map(|(n, pos)| (n, [pos[0]/n as F, pos[1]/n as F]))
+            .unwrap_or((0, [0.0, 0.0]))
+    }
+
+    pub fn gravity_from_group<'a, I: Iterator<Item = &'a RwLock<Atom>>>(self, from: I, world_size: [F; 2], g: F, power: u8) -> [F; 2]
+    {
+        let (count, pos) = Self::average_pos_and_count(from);
+        self.gravity_from(pos, world_size, g*count as F, power)
     }
 }
