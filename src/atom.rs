@@ -6,6 +6,10 @@ pub mod species;
 
 type F = f32;
 
+const CLOSE_RANGE_REPULSION: F = -50.0;
+const CLOSE_RANGE_DISTANCE: F = 60.0;
+const CLOSE_RANGE_DISTANCE_INV: F = 1.0/CLOSE_RANGE_DISTANCE;
+
 #[derive(Clone, Copy)]
 pub struct Atom
 {
@@ -94,6 +98,15 @@ impl Atom
             return [0.0, 0.0]
         }
         let d_abs_inv = d[0].hypot(d[1]).recip();
+        let g = if g > CLOSE_RANGE_REPULSION && d_abs_inv > CLOSE_RANGE_DISTANCE_INV
+        {
+            let m = d_abs_inv.recip()/CLOSE_RANGE_DISTANCE;
+            g*m + CLOSE_RANGE_REPULSION*(1.0 - m)
+        }
+        else
+        {
+            g
+        };
         let f_abs = g*d_abs_inv.powi(power as i32 + 1);
 
         [
