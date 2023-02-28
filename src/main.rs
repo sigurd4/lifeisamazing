@@ -13,14 +13,14 @@ use piston_window::{PistonWindow, WindowSettings, TimeStamp};
 use rand::distributions::{Uniform, Standard};
 use rand::prelude::Distribution;
 use rand::rngs::ThreadRng;
+use rand_distr::StandardNormal;
 use rayon::prelude::{IntoParallelRefIterator, IntoParallelIterator, ParallelIterator};
 
 use crate::atom::Atom;
 use crate::atom::species::Species;
-use crate::rule::Rule;
 
 mod atom;
-mod rule;
+mod fast_invsqrt;
 
 type F = f32;
 
@@ -33,15 +33,20 @@ enum SpawnArea
 
 const POPULATION: usize = 300*SPECIES_COUNT;
 const INITIAL_WINDOW_SIZE: [f64; 2] = [640.0, 480.0];
-const G_MUL: F = 2.5;
-const G_BIAS: F = 0.0;
-const G_BIAS_MUL: F = 1.0;
-const VISCOUSITY: F = 1.0;
-const SUCK: F = 1.0;
 const SPAWN_AREA: SpawnArea = SpawnArea::Ellipse;
-const SIMULTANEOUS_ENFORCEMENTS: usize = 64;
+const WORLD_WRAPPING: bool = false;
+
+const MIN_G_ORDER: u8 = 1;
 const MAX_G_ORDER: u8 = 1;
+const G_ORDER_COUNT: usize = 1 + MAX_G_ORDER as usize - MIN_G_ORDER as usize;
+const G_VARIANCE: F = 200.0;
+const G_MEAN: F = 0.0;
+
+const VISCOUSITY: F = 3.0;
+const SUCK: F = 0.03;
+
 const RFRAMES: usize = 1;
+const SIMULTANEOUS_ENFORCEMENTS: usize = 64;
 
 const RED: Species = Species {
     id: 0,
@@ -113,64 +118,10 @@ fn main() {
     
     let mut world_size: [F; 2] = [INITIAL_WINDOW_SIZE[0] as F, INITIAL_WINDOW_SIZE[1] as F];
 
-    let rules: [Vec<Rule>; SPECIES_COUNT] = {
-        let g_variance: F = G_MUL;
-        let g_weightset_count = Uniform::from(5..32).sample(rng);
-        let g_weightset: Vec<F> = (0..g_weightset_count)
-            .map(|_| random_gauss(rng)*g_variance)
-            .collect();
-        //let g_duality = random_gauss(rng)*g_variance;
-
-        array_init(|i| {
-            //let g_duality = if i < SPECIES_COUNT/2 {g_duality} else {-g_duality};
-
-            let b = g_weightset[Uniform::from(0..g_weightset_count).sample(rng)]*G_BIAS_MUL;
-            let s = g_weightset[Uniform::from(0..g_weightset_count).sample(rng)] + 1.0;
-
-            (1..=Uniform::from(1..=MAX_G_ORDER).sample(rng))
-                .map(|power| [power]
-                        .iter()
-                        .map(|power| 
-                            {
-                                let rng = &mut rand::thread_rng();
-
-                                let w = g_weightset[Uniform::from(0..g_weightset_count).sample(rng)] + 1.0;
-                                let m = g_weightset[Uniform::from(0..g_weightset_count).sample(rng)];
-
-                                Rule::GravitySelf( 
-                                    random_gauss(rng)*g_variance + ((random_gauss(rng) + 1.0)*g_variance + w)*random_gauss(rng)*m*s + b + G_BIAS,
-                                    *power
-                                )
-                            }
-                        )
-                        .chain((0..SPECIES_COUNT)
-                            .filter_map(|j| if i != j {Some(&ATOM_SPECIES[j])} else {None})
-                            .filter_map(|from|
-                                {
-                                    if Uniform::from(0.0..1.0).sample(rng) <= 0.4
-                                    {
-                                        let w = g_weightset[Uniform::from(0..g_weightset_count).sample(rng)];
-                                        let m = g_weightset[Uniform::from(0..g_weightset_count).sample(rng)];
-            
-                                        Some(
-                                            Rule::Gravity(
-                                                from,
-                                                random_gauss(rng)*g_variance + ((random_gauss(rng) + 1.0)*g_variance + w)*random_gauss(rng)*m*s + b + G_BIAS,
-                                                power
-                                            )
-                                        )
-                                    }
-                                    else
-                                    {
-                                        None
-                                    }
-                                }
-                            )
-                        )
-                        .collect()
-                )
-                .reduce(|accum, vec| [accum, vec].concat())
-                .unwrap_or_default()
+    let force_matrix: [[[F; SPECIES_COUNT]; SPECIES_COUNT]; G_ORDER_COUNT] = {
+        array_init(|_order_rel| {
+            //let _order = MIN_G_ORDER + order_rel as u8;
+            array_init(|_atom| array_init(|_from| <StandardNormal as Distribution<F>>::sample(&StandardNormal, rng)*G_VARIANCE + G_MEAN))
         })
     };
 
@@ -182,12 +133,12 @@ fn main() {
         population
     };
 
-    let atoms: Arc<[Vec<RwLock<Atom>>; SPECIES_COUNT]> = Arc::new(ATOM_SPECIES
+    let mut atoms: [Vec<Atom>; SPECIES_COUNT] = ATOM_SPECIES
         .map(|species| (0..population[species.id as usize])
             .map(|_|
             {
                 let center = [world_size[0]*0.5, world_size[1]*0.5];
-                RwLock::new(Atom {
+                Atom {
                     pos: match SPAWN_AREA
                     {
                         SpawnArea::Rectangle => [
@@ -206,19 +157,16 @@ fn main() {
                     vel: [0.0, 0.0],
                     acc: [0.0, 0.0],
                     species: species.id,
-                })
+                }
             })
             .collect()
-        ));
+        );
 
-    let cycle_rules_sequence: Vec<(usize, Rule)> = ATOM_SPECIES.iter()
-        .flat_map(|species| rules[species.index()]
-            .iter()
-            .map(|rule| (species.index(), *rule))
-        )
-        .collect();
+    let cycle_rules_sequence: [(u8, u8, u8); G_ORDER_COUNT*SPECIES_COUNT*SPECIES_COUNT] = {
+        array_init(|i| ((i/(SPECIES_COUNT*SPECIES_COUNT)) as u8 + MIN_G_ORDER, ((i/SPECIES_COUNT)%SPECIES_COUNT) as u8, (i%SPECIES_COUNT) as u8))
+    };
     
-    let cycle_rules: Arc<Mutex<Vec<(usize, Rule)>>> = Arc::new(Mutex::new(cycle_rules_sequence.clone()));
+    let mut cycle_rules: Vec<(u8, u8, u8)> = vec![];
     
     let mut frame_time = SystemTime::now();
 
@@ -239,10 +187,9 @@ fn main() {
         ];
 
         {
-            let mut cycle_rules = cycle_rules.lock().unwrap();
             while cycle_rules.len() < SIMULTANEOUS_ENFORCEMENTS.min(cycle_rules_sequence.len())
             {
-                let mut cycle_rules_sequence = cycle_rules_sequence.clone();
+                let mut cycle_rules_sequence = cycle_rules_sequence.to_vec();
                 cycle_rules_sequence.sort_by(|_, _| match Uniform::from(0..2).sample(&mut rand::thread_rng()) == 1
                 {
                     true => Ordering::Greater,
@@ -252,66 +199,43 @@ fn main() {
             }
         }
         //ENFORCE RULES
-        (0..SIMULTANEOUS_ENFORCEMENTS.min(cycle_rules_sequence.len()))
-            .map(|_| cycle_rules.clone())
-            .collect::<Vec<Arc<Mutex<Vec<(usize, Rule)>>>>>()
+        cycle_rules.drain(0..SIMULTANEOUS_ENFORCEMENTS.min(cycle_rules_sequence.len()))
+            .collect::<Vec<(u8, u8, u8)>>()
             .into_par_iter()
-            .map(|cycle_rules| loop
-            {
-                match {
-                    let cycle_rules = cycle_rules.clone();
-                    loop
-                    {
-                        match cycle_rules.lock()
-                        {
-                            Ok(mut cycle_rules) => break cycle_rules.pop(),
-                            Err(_) => ()
-                        }
-                    }
-                }
+            .map(|(power, index, from_species)| {
+                let g = {
+                    let i = (power - MIN_G_ORDER) as usize;
+                    let j = index as usize;
+                    let k = from_species as usize;
+                    force_matrix[i][j][k]
+                };
+                //let g = force_matrix[(power - MIN_G_ORDER) as usize][index as usize][from_species as usize];
+                
+                (index, if index != from_species
                 {
-                    Some((index, rule)) => {
-                        //let species = ATOM_SPECIES[index];
-                        break (index, match rule
-                        {
-                            Rule::Gravity(from_species, g, power) => {
-                                let from = &atoms[from_species.id as usize];
-        
-                                (&atoms[index]).iter()
-                                    //.filter(|atom| atom.is_species(species))
-                                    .enumerate()
-                                    .map(|(i, atom)| {
-                                        atom.read()
-                                            .ok()
-                                            .map(|atom| {
-                                                atom.gravity_from_group(
-                                                    from.iter()
-                                                        .enumerate()
-                                                        .filter(|(j, _)| from_species.id as usize != index || i != *j)
-                                                        .map(|(_, from)| from),
-                                                    world_size,
-                                                    g,
-                                                    power
-                                                )
-                                            })
-                                            .unwrap_or([0.0, 0.0])
-                                    }).collect()
-                            },
-                            Rule::GravitySelf(g, power) => {
-                                let atoms_group = &atoms[index];
-                                    
-                                Atom::gravity_all(atoms_group, world_size, g, power)
-                            }
-                        })
-                    },
-                    None => println!("Empty")
+                    let from = &atoms[from_species as usize];
+                    
+                    (&atoms[index as usize]).iter()
+                        .map(|atom| {
+                            atom.gravity_from_group(
+                                from.iter(),
+                                world_size,
+                                g,
+                                power
+                            )
+                        }).collect()
                 }
-            }).collect::<Vec<(usize, Vec<[F; 2]>)>>()
+                else
+                {
+                    let atoms_group = &atoms[index as usize];
+                        
+                    Atom::gravity_all(atoms_group, world_size, g, power)
+                })
+            }).collect::<Vec<(u8, Vec<[F; 2]>)>>()
             .into_iter()
             .for_each(|(index, gravity)| {
-                for (mut atom, gravity) in atoms[index].iter()
+                for (atom, gravity) in atoms[index as usize].iter_mut()
                     .zip(gravity.into_iter())
-                    .filter_map(|(atom, gravity)| atom.write().ok().map(|atom| (atom, gravity)))
                 {
                     let pos = atom.pos;
                     atom.apply_force([gravity[0] - pos[0]*SUCK, gravity[1] - pos[1]*SUCK])
@@ -326,12 +250,11 @@ fn main() {
                 .for_each(|species|
                     {
                         let index = species.index();
-                        let atoms_group = &atoms[index];
+                        let atoms_group = &mut atoms[index];
                         atoms_group
-                            .iter()
+                            .iter_mut()
                             .for_each(|atom| 
                                 {
-                                    let mut atom = atom.write().unwrap();
                                     atom.update_movement(dt, boundry, brakes);
                                 }
                             );
@@ -356,7 +279,6 @@ fn main() {
                             .filter(|(i, _)| ATOM_SPECIES[*i].size != 0.0)
                             .flat_map(|(_, atoms_group)| atoms_group)
                         {
-                            let atom = atom.read().unwrap();
                             let draw_pos: [f64; 2] = [
                                 (atom.pos[0] + atom.vel[0]*dt as F + world_center[0]) as f64,
                                 (atom.pos[1] + atom.vel[1]*dt as F + world_center[1]) as f64
@@ -405,12 +327,11 @@ fn main() {
             .for_each(|species|
                 {
                     let index = species.index();
-                    let atoms_group = &atoms[index];
+                    let atoms_group = &mut atoms[index];
                     atoms_group
-                        .iter()
+                        .iter_mut()
                         .for_each(|atom| 
                             {
-                                let mut atom = atom.write().unwrap();
                                 atom.reset_acc();
                             }
                         );

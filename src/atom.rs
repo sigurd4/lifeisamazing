@@ -2,13 +2,17 @@ use std::sync::{RwLock, RwLockReadGuard};
 
 use rayon::prelude::{ParallelIterator, IntoParallelRefIterator, IndexedParallelIterator};
 
+use crate::{MIN_G_ORDER, WORLD_WRAPPING};
+use crate::fast_invsqrt::FastInvSqrt;
+
 pub mod species;
 
 type F = f32;
 
-const CLOSE_RANGE_REPULSION: F = -50.0;
-const CLOSE_RANGE_DISTANCE: F = 60.0;
-const CLOSE_RANGE_DISTANCE_INV: F = 1.0/CLOSE_RANGE_DISTANCE;
+const CLOSE_RANGE_REPULSION: F = -100.0;
+const CLOSE_RANGE_DISTANCE: F = 80.0;
+const CLOSE_RANGE_DISTANCE_SQR: F = CLOSE_RANGE_DISTANCE*CLOSE_RANGE_DISTANCE;
+const CLOSE_RANGE_DISTANCE_INV_SQR: F = 1.0/CLOSE_RANGE_DISTANCE_SQR;
 
 #[derive(Clone, Copy)]
 pub struct Atom
@@ -36,16 +40,22 @@ impl Atom
             self.vel[I] = -self.vel[I]
         }
         self.vel[I] = (self.vel[I] + self.acc[I]*dt)*brakes;
-        self.pos[I] = (self.pos[I] + self.vel[I]*dt).max(min).min(max);
-        /*self.pos[I] = self.pos[I] + self.vel[I]*dt;
-        if self.pos[I] < boundry[0][I]
+        if WORLD_WRAPPING
         {
-            self.pos[I] += boundry[1][I] - boundry[0][I]
+            self.pos[I] = self.pos[I] + self.vel[I]*dt;
+            if self.pos[I] < boundry[0][I]
+            {
+                self.pos[I] += boundry[1][I] - boundry[0][I]
+            }
+            if self.pos[I] > boundry[1][I]
+            {
+                self.pos[I] -= boundry[1][I] - boundry[0][I]
+            }
         }
-        if self.pos[I] > boundry[1][I]
+        else
         {
-            self.pos[I] -= boundry[1][I] - boundry[0][I]
-        }*/
+            self.pos[I] = (self.pos[I] + self.vel[I]*dt).max(min).min(max);
+        }
     }
 
     pub fn reset_acc(&mut self)
@@ -62,31 +72,26 @@ impl Atom
         self.pos[1] += self.vel[1]*dt;*/
     }
 
-    /*pub fn dist_from(&self, pos: [f64; 2]) -> [f64; 2]
+    pub fn dist_to(&self, pos: [F; 2], world_size: [F; 2]) -> [F; 2]
     {
-        [
-            self.pos[0] - pos[0],
-            self.pos[1] - pos[1]
-        ]
-    }*/
-
-    pub fn dist_to(&self, pos: [F; 2], _world_size: [F; 2]) -> [F; 2]
-    {
-        let d = [
+        let mut d = [
             pos[0] - self.pos[0],
             pos[1] - self.pos[1]
         ];
-        /*for i in 0..2
+        if WORLD_WRAPPING
         {
-            if d[i] > world_size[i]*0.5
+            for i in 0..2
             {
-                d[i] -= world_size[i]
-            }
-            if d[i] < -world_size[i]*0.5
-            {
-                d[i] += world_size[i]
-            }
-        };*/
+                if d[i] > world_size[i]*0.5
+                {
+                    d[i] -= world_size[i]
+                }
+                if d[i] < -world_size[i]*0.5
+                {
+                    d[i] += world_size[i]
+                }
+            };
+        }
         d
     }
 
@@ -97,17 +102,27 @@ impl Atom
         {
             return [0.0, 0.0]
         }
-        let d_abs_inv = d[0].hypot(d[1]).recip();
-        let g = if g > CLOSE_RANGE_REPULSION && d_abs_inv > CLOSE_RANGE_DISTANCE_INV
+        let d_abs2 = d[0]*d[0] + d[1]*d[1];
+        let g = if power == MIN_G_ORDER && g > CLOSE_RANGE_REPULSION && d_abs2 < CLOSE_RANGE_DISTANCE_SQR
         {
-            let m = d_abs_inv.recip()/CLOSE_RANGE_DISTANCE;
+            let m = d_abs2*CLOSE_RANGE_DISTANCE_INV_SQR;
             g*m + CLOSE_RANGE_REPULSION*(1.0 - m)
+            //CLOSE_RANGE_REPULSION
         }
         else
         {
             g
         };
-        let f_abs = g*d_abs_inv.powi(power as i32 + 1);
+        if g == 0.0
+        {
+            return [0.0, 0.0]
+        }
+        let d_abs_inv = d_abs2.fast_invsqrt();
+        let mut f_abs = g*d_abs_inv;
+        for _ in 1..=power
+        {
+            f_abs *= d_abs_inv;
+        }
 
         [
             f_abs*d[0],
@@ -115,13 +130,12 @@ impl Atom
         ]
     }
 
-    pub fn gravity_all(atoms: &[RwLock<Self>], world_size: [F; 2], g: F, power: u8) -> Vec<[F; 2]>
+    pub fn gravity_all(atoms: &[Self], world_size: [F; 2], g: F, power: u8) -> Vec<[F; 2]>
     {
         let mut force = vec![[0.0, 0.0]; atoms.len()];
 
-        let atoms: Vec<(usize, RwLockReadGuard<Atom>)> = atoms.iter()
+        let atoms: Vec<(usize, &Atom)> = atoms.iter()
             .enumerate()
-            .filter_map(|(i, atom)| atom.read().ok().map(|atom| (i, atom)))
             .collect();
         atoms
             .iter()
@@ -142,22 +156,22 @@ impl Atom
         force
     }
 
-    pub fn average_pos_and_count<'a, I: Iterator<Item = &'a RwLock<Atom>>>(atoms: I) -> (usize, [F; 2])
+    pub fn gravity_from_group<'a, I: Iterator<Item = &'a Atom>>(self, from: I, world_size: [F; 2], g: F, power: u8) -> [F; 2]
     {
-        atoms
-            .filter_map(|atom| atom.read().ok())
-            .map(|atom| (1, atom.pos))
-            .reduce(|(n, accum), (i, pos)| (n + i, [
-                accum[0] + pos[0],
-                accum[1] + pos[1]
-            ]))
-            .map(|(n, pos)| (n, [pos[0]/n as F, pos[1]/n as F]))
-            .unwrap_or((0, [0.0, 0.0]))
-    }
-
-    pub fn gravity_from_group<'a, I: Iterator<Item = &'a RwLock<Atom>>>(self, from: I, world_size: [F; 2], g: F, power: u8) -> [F; 2]
-    {
-        let (count, pos) = Self::average_pos_and_count(from);
-        self.gravity_from(pos, world_size, g*count as F, power)
+        from
+            .filter_map(|other| if self.pos != other.pos
+            {
+                Some(other.pos)
+            }
+            else
+            {
+                None
+            })
+            .map(|from| self.gravity_from(from, world_size, g, power))
+            .reduce(|accum, gravity| [
+                accum[0] + gravity[0],
+                accum[1] + gravity[1]
+            ])
+            .unwrap_or([0.0, 0.0])
     }
 }
