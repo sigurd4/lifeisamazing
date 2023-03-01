@@ -35,26 +35,26 @@ impl Atom
     {
         let min = boundry[0][I];
         let max = boundry[1][I];
-        if if self.vel[I] < 0.0 {self.pos[I] <= min} else {self.pos[I] >= max}
-        {
-            self.vel[I] = -self.vel[I]
-        }
         self.vel[I] = (self.vel[I] + self.acc[I]*dt)*brakes;
+        self.pos[I] = self.pos[I] + self.vel[I]*dt;
         if WORLD_WRAPPING
         {
-            self.pos[I] = self.pos[I] + self.vel[I]*dt;
-            if self.pos[I] < boundry[0][I]
+            if self.pos[I] < min
             {
-                self.pos[I] += boundry[1][I] - boundry[0][I]
+                self.pos[I] += max - min
             }
-            if self.pos[I] > boundry[1][I]
+            if self.pos[I] > max
             {
-                self.pos[I] -= boundry[1][I] - boundry[0][I]
+                self.pos[I] -= max - min
             }
         }
         else
         {
-            self.pos[I] = (self.pos[I] + self.vel[I]*dt).max(min).min(max);
+            if if self.vel[I] < 0.0 {self.pos[I] <= min} else {self.pos[I] >= max}
+            {
+                self.vel[I] = -self.vel[I]
+            }
+            self.pos[I] = self.pos[I].max(min).min(max);
         }
     }
 
@@ -95,42 +95,55 @@ impl Atom
         d
     }
 
-    fn gravity_from(&self, pos: [F; 2], world_size: [F; 2], g: F, power: u8) -> [F; 2]
+    fn gravity_from(&self, pos: [F; 2], world_size: [F; 2], g: &[F], power: u8) -> [F; 2]
     {
+        if g.len() == 0
+        {
+            return [0.0, 0.0]
+        }
         let d = self.dist_to(pos, world_size);
         if (d[0] == 0.0 || d[0] == -0.0) && (d[1] == 0.0 || d[1] == -0.0)
         {
             return [0.0, 0.0]
         }
         let d_abs2 = d[0]*d[0] + d[1]*d[1];
-        let g = if power == MIN_G_ORDER && g > CLOSE_RANGE_REPULSION && d_abs2 < CLOSE_RANGE_DISTANCE_SQR
+        let (g0, first_only) = if power == MIN_G_ORDER && g[0] > CLOSE_RANGE_REPULSION && d_abs2 < CLOSE_RANGE_DISTANCE_SQR
         {
             let m = d_abs2*CLOSE_RANGE_DISTANCE_INV_SQR;
-            g*m + CLOSE_RANGE_REPULSION*(1.0 - m)
-            //CLOSE_RANGE_REPULSION
+            let g0 = g[0]*m + CLOSE_RANGE_REPULSION*(1.0 - m);
+            (g0, true)
         }
         else
         {
-            g
+            (g[0], false)
         };
-        if g == 0.0
+        if g0 == 0.0 && g[1..].into_iter().all(|&g| g == 0.0)
         {
             return [0.0, 0.0]
         }
         let d_abs_inv = d_abs2.fast_invsqrt();
-        let mut f_abs = g*d_abs_inv;
+        let mut magnitude = d_abs_inv;
         for _ in 1..=power
         {
-            f_abs *= d_abs_inv;
+            magnitude *= d_abs_inv;
+        }
+        let mut force = g0*magnitude;
+        if !first_only
+        {
+            for &g in g[1..].into_iter()
+            {
+                magnitude *= d_abs_inv;
+                force += g*magnitude;
+            }
         }
 
         [
-            f_abs*d[0],
-            f_abs*d[1]
+            force*d[0],
+            force*d[1]
         ]
     }
 
-    pub fn gravity_all(atoms: &[Self], world_size: [F; 2], g: F, power: u8) -> Vec<[F; 2]>
+    pub fn gravity_all(atoms: &[Self], world_size: [F; 2], g: &[F], power: u8) -> Vec<[F; 2]>
     {
         let mut force = vec![[0.0, 0.0]; atoms.len()];
 
@@ -156,7 +169,7 @@ impl Atom
         force
     }
 
-    pub fn gravity_from_group<'a, I: Iterator<Item = &'a Atom>>(self, from: I, world_size: [F; 2], g: F, power: u8) -> [F; 2]
+    pub fn gravity_from_group<'a, I: Iterator<Item = &'a Atom>>(self, from: I, world_size: [F; 2], g: &[F], power: u8) -> [F; 2]
     {
         from
             .filter_map(|other| if self.pos != other.pos

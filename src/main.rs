@@ -37,12 +37,12 @@ const SPAWN_AREA: SpawnArea = SpawnArea::Ellipse;
 const WORLD_WRAPPING: bool = false;
 
 const MIN_G_ORDER: u8 = 1;
-const MAX_G_ORDER: u8 = 1;
+const MAX_G_ORDER: u8 = 3;
 const G_ORDER_COUNT: usize = 1 + MAX_G_ORDER as usize - MIN_G_ORDER as usize;
 const G_VARIANCE: F = 200.0;
 const G_MEAN: F = 0.0;
 
-const VISCOUSITY: F = 3.0;
+const VISCOUSITY: F = 4.0;
 const SUCK: F = 0.03;
 
 const RFRAMES: usize = 1;
@@ -118,7 +118,7 @@ fn main() {
     
     let mut world_size: [F; 2] = [INITIAL_WINDOW_SIZE[0] as F, INITIAL_WINDOW_SIZE[1] as F];
 
-    let force_matrix: [[[F; SPECIES_COUNT]; SPECIES_COUNT]; G_ORDER_COUNT] = {
+    let force_matrix: [[[F; G_ORDER_COUNT]; SPECIES_COUNT]; SPECIES_COUNT] = {
         array_init(|_order_rel| {
             //let _order = MIN_G_ORDER + order_rel as u8;
             array_init(|_atom| array_init(|_from| <StandardNormal as Distribution<F>>::sample(&StandardNormal, rng)*G_VARIANCE + G_MEAN))
@@ -162,11 +162,11 @@ fn main() {
             .collect()
         );
 
-    let cycle_rules_sequence: [(u8, u8, u8); G_ORDER_COUNT*SPECIES_COUNT*SPECIES_COUNT] = {
-        array_init(|i| ((i/(SPECIES_COUNT*SPECIES_COUNT)) as u8 + MIN_G_ORDER, ((i/SPECIES_COUNT)%SPECIES_COUNT) as u8, (i%SPECIES_COUNT) as u8))
+    let cycle_rules_sequence: [(u8, u8); SPECIES_COUNT*SPECIES_COUNT] = {
+        array_init(|i| ((i/SPECIES_COUNT) as u8, (i%SPECIES_COUNT) as u8))
     };
     
-    let mut cycle_rules: Vec<(u8, u8, u8)> = vec![];
+    let mut cycle_rules: Vec<(u8, u8)> = vec![];
     
     let mut frame_time = SystemTime::now();
 
@@ -200,14 +200,13 @@ fn main() {
         }
         //ENFORCE RULES
         cycle_rules.drain(0..SIMULTANEOUS_ENFORCEMENTS.min(cycle_rules_sequence.len()))
-            .collect::<Vec<(u8, u8, u8)>>()
+            .collect::<Vec<(u8, u8)>>()
             .into_par_iter()
-            .map(|(power, index, from_species)| {
+            .map(|(index, from_species)| {
                 let g = {
-                    let i = (power - MIN_G_ORDER) as usize;
-                    let j = index as usize;
-                    let k = from_species as usize;
-                    force_matrix[i][j][k]
+                    let i = index as usize;
+                    let j = from_species as usize;
+                    force_matrix[i][j]
                 };
                 //let g = force_matrix[(power - MIN_G_ORDER) as usize][index as usize][from_species as usize];
                 
@@ -220,8 +219,8 @@ fn main() {
                             atom.gravity_from_group(
                                 from.iter(),
                                 world_size,
-                                g,
-                                power
+                                &g,
+                                MIN_G_ORDER
                             )
                         }).collect()
                 }
@@ -229,7 +228,7 @@ fn main() {
                 {
                     let atoms_group = &atoms[index as usize];
                         
-                    Atom::gravity_all(atoms_group, world_size, g, power)
+                    Atom::gravity_all(atoms_group, world_size, &g, MIN_G_ORDER)
                 })
             }).collect::<Vec<(u8, Vec<[F; 2]>)>>()
             .into_iter()
